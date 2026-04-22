@@ -32,22 +32,27 @@ DEFAULT_STD_PROBS = [1.0, 0.8, 0.6, 0.4]
 
 # 标准长度内部权重
 DEFAULT_STD_WEIGHTS = {4: 0.5, 6: 0.3, 10: 0.2}
-# 非标准长度列表及默认概率（等概率）
-NON_STD_LENGTHS = [1, 2, 3, 8]
+# 非标准长度默认列表及权重（等概率）
+DEFAULT_NON_STD_WEIGHTS = {1: 0.25, 2: 0.25, 3: 0.25, 8: 0.25}
+
+# ---------- Session State 初始化 ----------
+if 'non_std_weights' not in st.session_state:
+    st.session_state.non_std_weights = DEFAULT_NON_STD_WEIGHTS.copy()
 
 # ---------- 辅助函数 ----------
 def weighted_choice(choices, weights):
     """根据权重随机选择一个值"""
     return random.choices(choices, weights=weights, k=1)[0]
 
-def split_color_total(total, interval_idx, std_prob, std_weights, non_std_lengths):
+def split_color_total(total, interval_idx, std_prob, std_weights, non_std_weights):
     """
     将一种颜色的总人数按当前区间的长度概率切分成段。
     返回该区间内切出的段长度列表。
     """
     remaining = total
     segments = []
-    non_std_weights = [1/len(non_std_lengths)] * len(non_std_lengths)  # 等概率
+    non_std_lengths = list(non_std_weights.keys())
+    non_std_probs = list(non_std_weights.values())
     while remaining > 0:
         # 决定长度类型
         if random.random() < std_prob:
@@ -55,7 +60,7 @@ def split_color_total(total, interval_idx, std_prob, std_weights, non_std_length
             length = weighted_choice(list(std_weights.keys()), list(std_weights.values()))
         else:
             # 非标准长度
-            length = weighted_choice(non_std_lengths, non_std_weights)
+            length = weighted_choice(non_std_lengths, non_std_probs)
         # 不能超过剩余人数
         length = min(length, remaining)
         segments.append(length)
@@ -144,7 +149,7 @@ def fix_consecutive_limit(segments, max_consecutive=10):
     return segments
 
 def generate_final_sequence(total_counts, unlock_progress, intervals, interval_ratios,
-                            std_probs, std_weights, non_std_lengths):
+                            std_probs, std_weights, non_std_weights):
     """主生成函数，返回颜色代码列表（如['b','b','y',...]）"""
     total_people = sum(total_counts.values())
     # 计算各区间的目标人数
@@ -208,7 +213,7 @@ def generate_final_sequence(total_counts, unlock_progress, intervals, interval_r
                 # 该颜色在本区间尚未解锁，不应分配人数（但上面分配已经考虑了解锁，这里作为安全检查）
                 continue
             std_prob = std_probs[idx]
-            segs = split_color_total(alloc, idx, std_prob, std_weights, non_std_lengths)
+            segs = split_color_total(alloc, idx, std_prob, std_weights, non_std_weights)
             segments_by_color[c].extend(segs)
 
     # 按区间拼装序列
@@ -326,9 +331,50 @@ with st.expander("⚖️ 标准长度内部权重", expanded=False):
         std_weights = {4: 1/3, 6: 1/3, 10: 1/3}
     st.write("归一化后权重：", {k: f"{v:.2f}" for k, v in std_weights.items()})
 
-with st.expander("🔢 非标准长度选项", expanded=False):
-    st.markdown("非标准长度固定为 1,2,3,8，出现概率相等（各25%）。如需修改请在代码中调整 `NON_STD_LENGTHS`。")
-    st.code("当前非标准长度: [1, 2, 3, 8]")
+with st.expander("🔢 非标准长度选项（可自定义添加/删除，调节权重）", expanded=False):
+    st.markdown("### 当前非标准长度列表")
+    # 显示现有非标准长度及其权重滑块
+    to_delete = None
+    updated_weights = {}
+    for length, weight in list(st.session_state.non_std_weights.items()):
+        cols = st.columns([1, 2, 1])
+        with cols[0]:
+            st.markdown(f"**{length}**")
+        with cols[1]:
+            new_weight = st.slider(
+                f"权重", 0.0, 1.0, weight, 0.05,
+                key=f"nonstd_w_{length}"
+            )
+            updated_weights[length] = new_weight
+        with cols[2]:
+            if st.button("❌ 删除", key=f"del_{length}"):
+                to_delete = length
+    # 处理删除
+    if to_delete is not None:
+        del st.session_state.non_std_weights[to_delete]
+        st.rerun()
+    # 更新权重并归一化
+    total_nw = sum(updated_weights.values())
+    if total_nw > 0:
+        st.session_state.non_std_weights = {k: v/total_nw for k, v in updated_weights.items()}
+    else:
+        st.error("权重总和不能为0，请至少保留一个非标准长度且权重大于0。")
+    st.write("归一化后权重：", {k: f"{v:.2f}" for k, v in st.session_state.non_std_weights.items()})
+    
+    st.markdown("---")
+    st.markdown("### 添加新的非标准长度")
+    new_len = st.number_input("新长度值（正整数，≤10）", min_value=1, max_value=10, value=5, step=1)
+    new_weight = st.slider("初始权重", 0.0, 1.0, 0.1, 0.05, key="new_weight")
+    if st.button("➕ 添加"):
+        if new_len in st.session_state.non_std_weights:
+            st.warning(f"长度 {new_len} 已存在！")
+        else:
+            st.session_state.non_std_weights[new_len] = new_weight
+            # 重新归一化
+            total = sum(st.session_state.non_std_weights.values())
+            st.session_state.non_std_weights = {k: v/total for k, v in st.session_state.non_std_weights.items()}
+            st.rerun()
+    st.caption("提示：添加后权重会自动归一化，你可以再调节各权重值。")
 
 # 生成按钮
 if st.button("🚀 生成序列", type="primary", use_container_width=True):
@@ -346,7 +392,7 @@ if st.button("🚀 生成序列", type="primary", use_container_width=True):
                 interval_ratios,
                 std_probs,
                 std_weights,
-                NON_STD_LENGTHS
+                st.session_state.non_std_weights  # 使用 session 中可编辑的权重
             )
             compressed = sequence_to_string(final_seq)
         
