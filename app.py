@@ -31,7 +31,7 @@ DEFAULT_RATIOS = [0.39, 0.10, 0.30, 0.21]
 DEFAULT_STD_PROBS = [1.0, 0.8, 0.6, 0.4]
 
 # 标准长度内部权重
-DEFAULT_STD_WEIGHTS = {4: 0.5, 6: 0.3, 10: 0.2}
+DEFAULT_STD_WEIGHTS = {4: 0.4, 6: 0.3, 10: 0.3}
 # 非标准长度默认列表及权重（等概率）
 DEFAULT_NON_STD_WEIGHTS = {1: 0.25, 2: 0.25, 3: 0.25, 8: 0.25}
 
