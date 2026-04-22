@@ -3,6 +3,33 @@ import random
 from collections import defaultdict
 import pandas as pd
 
+
+
+def check_password():
+    """返回 `True` 如果用户密码验证成功。"""
+    # 如果已验证，直接返回 True
+    if st.session_state.get("authenticated", False):
+        return True
+
+    # 显示密码输入框
+    st.title("🔐 请输入访问密码")
+    with st.form("auth"):
+        password = st.text_input("密码", type="password")
+        submitted = st.form_submit_button("登录")
+
+        if submitted:
+            # 与 st.secrets 中的密码比对
+            if password == st.secrets["PASSWORD"]:
+                st.session_state["authenticated"] = True
+                st.rerun()  # 验证成功后重新运行应用
+            else:
+                st.error("密码错误，请重试。")
+    return False
+
+# --- 程序入口保护 ---
+if not check_password():
+    st.stop()  # 密码未通过时，停止执行后面的代码
+
 # ---------- 固定颜色代码与名称映射 ----------
 COLOR_NAMES = {
     'r': '红色', 'y': '黄色', 'b': '蓝色', 'g': '绿色',
