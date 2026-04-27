@@ -1,7 +1,6 @@
 import streamlit as st
 import random
 import re
-from collections import defaultdict
 import pandas as pd
 
 # ---------- 固定颜色代码与名称映射 ----------
@@ -11,24 +10,21 @@ COLOR_NAMES = {
 }
 COLORS_LIST = ['r', 'y', 'b', 'g', 'k', 'p', 'z', 's']
 
-# ---------- 初始化 session state ----------
+# ---------- Session State 初始化 ----------
 if 'color_counts' not in st.session_state:
     st.session_state.color_counts = {c: 0 for c in COLORS_LIST}
 if 'non_std_weights' not in st.session_state:
     st.session_state.non_std_weights = {1: 0.25, 2: 0.25, 3: 0.25, 8: 0.25}
+if 'seq_parsed' not in st.session_state:
+    st.session_state.seq_parsed = False
 
-# ---------- 默认解锁进度 ----------
+# ---------- 默认参数 ----------
 DEFAULT_UNLOCK = {
     'r': 0, 'y': 0, 'b': 0, 'g': 0,
     'k': 40, 'p': 50, 'z': 80, 's': 80
 }
-
-# ---------- 默认进度区间定义 ----------
 DEFAULT_INTERVALS = [
-    (0, 39),
-    (40, 49),
-    (50, 79),
-    (80, 100)
+    (0, 39), (40, 49), (50, 79), (80, 100)
 ]
 DEFAULT_RATIOS = [0.39, 0.10, 0.30, 0.21]
 DEFAULT_STD_PROBS = [1.0, 0.8, 0.6, 0.4]
@@ -38,7 +34,7 @@ DEFAULT_STD_WEIGHTS = {4: 0.5, 6: 0.3, 10: 0.2}
 def weighted_choice(choices, weights):
     return random.choices(choices, weights=weights, k=1)[0]
 
-def split_color_total(total, interval_idx, std_prob, std_weights, non_std_weights):
+def split_color_total(total, std_prob, std_weights, non_std_weights):
     remaining = total
     segments = []
     non_std_lengths = list(non_std_weights.keys())
@@ -53,7 +49,7 @@ def split_color_total(total, interval_idx, std_prob, std_weights, non_std_weight
         remaining -= length
     return segments
 
-def interleave_segments(segments_by_color, target_count, available_colors, max_consecutive=10):
+def interleave_segments(segments_by_color, target_count, available_colors):
     collected = []
     total_collected = 0
     color_cycle = available_colors[:]
@@ -75,27 +71,7 @@ def interleave_segments(segments_by_color, target_count, available_colors, max_c
                 total_collected += need
                 break
     random.shuffle(collected)
-    fixed = fix_adjacent_same_color(collected, segments_by_color, available_colors)
-    fixed = fix_consecutive_limit(fixed, max_consecutive)
-    return fixed, segments_by_color
-
-def fix_adjacent_same_color(segments, segments_by_color, available_colors):
-    i = 0
-    while i < len(segments) - 1:
-        if segments[i][0] == segments[i+1][0]:
-            swapped = False
-            for j in range(i+2, len(segments)):
-                if segments[j][0] != segments[i][0]:
-                    segments[i+1], segments[j] = segments[j], segments[i+1]
-                    swapped = True
-                    break
-            if not swapped:
-                pass
-        i += 1
-    return segments
-
-def fix_consecutive_limit(segments, max_consecutive=10):
-    return segments
+    return collected, segments_by_color
 
 def generate_final_sequence(total_counts, unlock_progress, intervals, interval_ratios,
                             std_probs, std_weights, non_std_weights):
@@ -106,47 +82,45 @@ def generate_final_sequence(total_counts, unlock_progress, intervals, interval_r
 
     remaining_by_color = total_counts.copy()
     color_interval_plan = {c: [0]*len(intervals) for c in COLORS_LIST}
+
     for idx, (low, high) in enumerate(intervals):
         available = [c for c in COLORS_LIST if unlock_progress[c] <= low]
         if not available:
             continue
-        target_for_interval = interval_targets[idx]
+        target = interval_targets[idx]
         total_remain = sum(remaining_by_color[c] for c in available)
         if total_remain == 0:
             continue
         for c in available:
             if total_remain == 0:
                 break
-            alloc = int(round((remaining_by_color[c] / total_remain) * target_for_interval))
+            alloc = int(round((remaining_by_color[c] / total_remain) * target))
             alloc = min(alloc, remaining_by_color[c])
             color_interval_plan[c][idx] = alloc
             remaining_by_color[c] -= alloc
-            target_for_interval -= alloc
+            target -= alloc
             total_remain = sum(remaining_by_color[c] for c in available)
-        if target_for_interval > 0:
+        if target > 0:
             for c in available:
                 if remaining_by_color[c] > 0:
-                    take = min(target_for_interval, remaining_by_color[c])
+                    take = min(target, remaining_by_color[c])
                     color_interval_plan[c][idx] += take
                     remaining_by_color[c] -= take
-                    target_for_interval -= take
-                    if target_for_interval == 0:
+                    target -= take
+                    if target == 0:
                         break
     for c in COLORS_LIST:
         if remaining_by_color[c] > 0:
             color_interval_plan[c][-1] += remaining_by_color[c]
-            remaining_by_color[c] = 0
 
     segments_by_color = {c: [] for c in COLORS_LIST}
     for c in COLORS_LIST:
         for idx, (low, high) in enumerate(intervals):
             alloc = color_interval_plan[c][idx]
-            if alloc <= 0:
-                continue
-            if unlock_progress[c] > low:
+            if alloc <= 0 or unlock_progress[c] > low:
                 continue
             std_prob = std_probs[idx]
-            segs = split_color_total(alloc, idx, std_prob, std_weights, non_std_weights)
+            segs = split_color_total(alloc, std_prob, std_weights, non_std_weights)
             segments_by_color[c].extend(segs)
 
     all_sequence_segments = []
@@ -195,149 +169,144 @@ def parse_sequence_string(s):
 # ---------- Streamlit 界面 ----------
 st.set_page_config(page_title="挪车运人序列生成器", layout="wide")
 st.title("🚗 挪车运人 · 序列生成器")
-st.markdown("输入各颜色总人数（可手动输入或粘贴序列），调整参数，生成最终序列（格式如 `b2y4g4r2`）。")
+st.markdown("在下方粘贴颜色序列（如 `r120y110g100b120`），调整参数后生成最终序列。")
 
-# 侧边栏
-st.sidebar.header("1️⃣ 各颜色总人数")
+# ---------- 左侧：序列输入 + 参数调整 ----------
+col_input, col_params = st.columns([1, 2])
 
-# 新增：粘贴序列文本框
-st.sidebar.subheader("📋 粘贴序列快速填充")
-seq_input = st.sidebar.text_input("粘贴序列 (例如 r120y110g100b120)", key="seq_input")
-if st.sidebar.button("解析并应用"):
-    if seq_input.strip():
-        parsed = parse_sequence_string(seq_input)
-        if parsed:
-            for code, cnt in parsed.items():
-                st.session_state.color_counts[code] = cnt
-            st.sidebar.success("已应用序列，下方数字已更新。")
+with col_input:
+    st.header("📥 输入序列")
+    seq_input = st.text_area(
+        "粘贴总序列",
+        placeholder="例如：r120y110g100b120",
+        height=100,
+        label_visibility="collapsed"
+    )
+    if st.button("🔍 解析序列", use_container_width=True):
+        if seq_input.strip():
+            parsed = parse_sequence_string(seq_input)
+            if parsed:
+                st.session_state.color_counts = parsed
+                st.session_state.seq_parsed = True
+                st.success("解析成功！")
+            else:
+                st.session_state.seq_parsed = False
+                st.error("未能识别有效颜色组合。格式应为：颜色字母+数字，如 r120")
         else:
-            st.sidebar.error("未能解析到有效颜色，格式应为颜色字母+数字，如 r120")
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("或手动调整各颜色人数")
-cols = st.sidebar.columns(2)
-for i, code in enumerate(COLORS_LIST):
-    with cols[i % 2]:
-        # 使用 session_state 中的值作为默认，并在修改时更新
-        cnt = st.number_input(
-            f"{COLOR_NAMES[code]} ({code})",
-            min_value=0,
-            value=st.session_state.color_counts[code],
-            step=1,
-            key=f"input_{code}"
-        )
-        st.session_state.color_counts[code] = cnt
-
-# 主区域：参数调整
-st.header("2️⃣ 调整生成参数")
-
-with st.expander("🎨 颜色解锁进度 (%)", expanded=True):
-    unlock_progress = {}
-    cols = st.columns(4)
-    for i, code in enumerate(COLORS_LIST):
-        with cols[i % 4]:
-            unlock_progress[code] = st.slider(
-                f"{COLOR_NAMES[code]} ({code})",
-                min_value=0, max_value=100, value=DEFAULT_UNLOCK[code], step=5,
-                key=f"unlock_{code}"
-            )
-
-with st.expander("📊 进度区间 & 人数占比", expanded=True):
-    st.markdown("定义四个进度区间（百分比），以及每个区间的人数占比（总和应为1）")
-    intervals = []
-    interval_ratios = []
-    cols = st.columns(4)
-    for i in range(4):
-        with cols[i]:
-            st.markdown(f"**区间 {i+1}**")
-            low = st.number_input(f"下限%", value=DEFAULT_INTERVALS[i][0], step=1, key=f"low_{i}")
-            high = st.number_input(f"上限%", value=DEFAULT_INTERVALS[i][1], step=1, key=f"high_{i}")
-            intervals.append((low, high))
-            ratio = st.number_input(f"人数占比", value=DEFAULT_RATIOS[i], step=0.01, format="%.2f", key=f"ratio_{i}")
-            interval_ratios.append(ratio)
-    total_ratio = sum(interval_ratios)
-    if abs(total_ratio - 1.0) > 0.001:
-        st.warning(f"⚠️ 人数占比总和为 {total_ratio:.2f}，将自动归一化。")
-        interval_ratios = [r / total_ratio for r in interval_ratios]
-
-with st.expander("🎲 长度类型概率（标准 vs 非标准）", expanded=True):
-    std_probs = []
-    cols = st.columns(4)
-    for i in range(4):
-        with cols[i]:
-            prob = st.slider(
-                f"区间{i+1} 标准长度概率",
-                min_value=0.0, max_value=1.0, value=DEFAULT_STD_PROBS[i], step=0.05,
-                key=f"std_prob_{i}"
-            )
-            std_probs.append(prob)
-            st.caption(f"非标准概率 = {1-prob:.2f}")
-
-with st.expander("⚖️ 标准长度内部权重", expanded=False):
-    st.markdown("标准长度选项：4、6、10")
-    std_weights = {}
-    cols = st.columns(3)
-    with cols[0]:
-        w4 = st.slider("长度4权重", 0.0, 1.0, DEFAULT_STD_WEIGHTS[4], 0.05, key="w4")
-    with cols[1]:
-        w6 = st.slider("长度6权重", 0.0, 1.0, DEFAULT_STD_WEIGHTS[6], 0.05, key="w6")
-    with cols[2]:
-        w10 = st.slider("长度10权重", 0.0, 1.0, DEFAULT_STD_WEIGHTS[10], 0.05, key="w10")
-    total_w = w4 + w6 + w10
-    if total_w > 0:
-        std_weights = {4: w4/total_w, 6: w6/total_w, 10: w10/total_w}
-    else:
-        std_weights = {4: 1/3, 6: 1/3, 10: 1/3}
-    st.write("归一化后权重：", {k: f"{v:.2f}" for k, v in std_weights.items()})
-
-with st.expander("🔢 非标准长度选项（可自定义添加/删除，调节权重）", expanded=False):
-    st.markdown("### 当前非标准长度列表")
-    to_delete = None
-    updated_weights = {}
-    for length, weight in list(st.session_state.non_std_weights.items()):
-        cols = st.columns([1, 2, 1])
-        with cols[0]:
-            st.markdown(f"**{length}**")
-        with cols[1]:
-            new_weight = st.slider(
-                f"权重", 0.0, 1.0, weight, 0.05,
-                key=f"nonstd_w_{length}"
-            )
-            updated_weights[length] = new_weight
-        with cols[2]:
-            if st.button("❌ 删除", key=f"del_{length}"):
-                to_delete = length
-    if to_delete is not None:
-        del st.session_state.non_std_weights[to_delete]
-        st.rerun()
-    total_nw = sum(updated_weights.values())
-    if total_nw > 0:
-        st.session_state.non_std_weights = {k: v/total_nw for k, v in updated_weights.items()}
-    else:
-        st.error("权重总和不能为0，请至少保留一个非标准长度且权重大于0。")
-    st.write("归一化后权重：", {k: f"{v:.2f}" for k, v in st.session_state.non_std_weights.items()})
+            st.warning("请输入序列。")
     
-    st.markdown("---")
-    st.markdown("### 添加新的非标准长度")
-    new_len = st.number_input("新长度值（正整数，≤10）", min_value=1, max_value=10, value=5, step=1)
-    new_weight = st.slider("初始权重", 0.0, 1.0, 0.1, 0.05, key="new_weight")
-    if st.button("➕ 添加"):
-        if new_len in st.session_state.non_std_weights:
-            st.warning(f"长度 {new_len} 已存在！")
-        else:
-            st.session_state.non_std_weights[new_len] = new_weight
-            total = sum(st.session_state.non_std_weights.values())
-            st.session_state.non_std_weights = {k: v/total for k, v in st.session_state.non_std_weights.items()}
-            st.rerun()
-    st.caption("提示：添加后权重会自动归一化，你可以再调节各权重值。")
+    if st.session_state.seq_parsed:
+        st.markdown("### ✅ 已解析的颜色数量")
+        for code, cnt in st.session_state.color_counts.items():
+            if cnt > 0:
+                st.write(f"**{COLOR_NAMES[code]} ({code})**：{cnt} 人")
 
-# 生成按钮
+with col_params:
+    st.header("⚙️ 生成参数")
+    
+    with st.expander("🎨 颜色解锁进度 (%)", expanded=True):
+        unlock_progress = {}
+        cols = st.columns(4)
+        for i, code in enumerate(COLORS_LIST):
+            with cols[i % 4]:
+                unlock_progress[code] = st.slider(
+                    f"{COLOR_NAMES[code]} ({code})",
+                    0, 100, DEFAULT_UNLOCK[code], 5,
+                    key=f"unlock_{code}"
+                )
+
+    with st.expander("📊 进度区间 & 人数占比", expanded=True):
+        intervals = []
+        interval_ratios = []
+        cols = st.columns(4)
+        for i in range(4):
+            with cols[i]:
+                st.markdown(f"**区间 {i+1}**")
+                low = st.number_input("下限%", value=DEFAULT_INTERVALS[i][0], step=1, key=f"low_{i}")
+                high = st.number_input("上限%", value=DEFAULT_INTERVALS[i][1], step=1, key=f"high_{i}")
+                intervals.append((low, high))
+                ratio = st.number_input("人数占比", value=DEFAULT_RATIOS[i], step=0.01, format="%.2f", key=f"ratio_{i}")
+                interval_ratios.append(ratio)
+        total_ratio = sum(interval_ratios)
+        if abs(total_ratio - 1.0) > 0.001:
+            st.warning(f"占比总和为 {total_ratio:.2f}，将自动归一化。")
+            interval_ratios = [r / total_ratio for r in interval_ratios]
+
+    with st.expander("🎲 长度类型概率", expanded=True):
+        std_probs = []
+        cols = st.columns(4)
+        for i in range(4):
+            with cols[i]:
+                prob = st.slider(
+                    f"区间{i+1} 标准概率",
+                    0.0, 1.0, DEFAULT_STD_PROBS[i], 0.05,
+                    key=f"std_prob_{i}"
+                )
+                std_probs.append(prob)
+                st.caption(f"非标准 = {1-prob:.2f}")
+
+    with st.expander("⚖️ 标准长度权重 (4/6/10)", expanded=False):
+        std_weights = {}
+        cols = st.columns(3)
+        with cols[0]:
+            w4 = st.slider("4", 0.0, 1.0, DEFAULT_STD_WEIGHTS[4], 0.05, key="w4")
+        with cols[1]:
+            w6 = st.slider("6", 0.0, 1.0, DEFAULT_STD_WEIGHTS[6], 0.05, key="w6")
+        with cols[2]:
+            w10 = st.slider("10", 0.0, 1.0, DEFAULT_STD_WEIGHTS[10], 0.05, key="w10")
+        total_w = w4 + w6 + w10
+        if total_w > 0:
+            std_weights = {4: w4/total_w, 6: w6/total_w, 10: w10/total_w}
+        else:
+            std_weights = {4: 1/3, 6: 1/3, 10: 1/3}
+        st.write("归一化后：", {k: f"{v:.2f}" for k, v in std_weights.items()})
+
+    with st.expander("🔢 非标准长度（可自定义添加/删除，调节权重）", expanded=False):
+        to_delete = None
+        updated_weights = {}
+        for length, weight in list(st.session_state.non_std_weights.items()):
+            cols = st.columns([1, 2, 1])
+            with cols[0]:
+                st.markdown(f"**{length}**")
+            with cols[1]:
+                new_weight = st.slider(
+                    f"权重", 0.0, 1.0, weight, 0.05,
+                    key=f"ns_w_{length}"
+                )
+                updated_weights[length] = new_weight
+            with cols[2]:
+                if st.button("❌", key=f"del_{length}"):
+                    to_delete = length
+        if to_delete is not None:
+            del st.session_state.non_std_weights[to_delete]
+            st.experimental_rerun()
+        total_ns = sum(updated_weights.values())
+        if total_ns > 0:
+            st.session_state.non_std_weights = {k: v/total_ns for k, v in updated_weights.items()}
+        else:
+            st.error("至少保留一个非标准长度且权重大于0。")
+        st.write("归一化后：", {k: f"{v:.2f}" for k, v in st.session_state.non_std_weights.items()})
+        
+        st.markdown("---")
+        new_len = st.number_input("新长度值（≤10）", 1, 10, 5, key="new_len")
+        new_w = st.slider("初始权重", 0.0, 1.0, 0.1, 0.05, key="new_w")
+        if st.button("➕ 添加非标准长度"):
+            if new_len in st.session_state.non_std_weights:
+                st.warning("已存在！")
+            else:
+                st.session_state.non_std_weights[new_len] = new_w
+                total = sum(st.session_state.non_std_weights.values())
+                st.session_state.non_std_weights = {k: v/total for k, v in st.session_state.non_std_weights.items()}
+                st.experimental_rerun()
+
+# ---------- 生成按钮 ----------
+st.divider()
 if st.button("🚀 生成序列", type="primary", use_container_width=True):
-    total_counts = st.session_state.color_counts.copy()
-    if sum(total_counts.values()) == 0:
-        st.error("请至少为一个颜色输入大于0的人数。")
+    if not st.session_state.seq_parsed or sum(st.session_state.color_counts.values()) == 0:
+        st.error("请先输入有效的颜色序列并点击“解析序列”。")
     else:
-        with st.spinner("正在生成序列..."):
+        total_counts = st.session_state.color_counts.copy()
+        with st.spinner("生成中..."):
             final_seq = generate_final_sequence(
                 total_counts,
                 unlock_progress,
@@ -350,60 +319,53 @@ if st.button("🚀 生成序列", type="primary", use_container_width=True):
             compressed = sequence_to_string(final_seq)
         
         st.success("生成完成！")
-        st.header("📋 生成结果")
+        st.header("📋 最终序列")
         st.code(compressed, language="text")
         
         col1, col2 = st.columns(2)
         with col1:
             st.metric("总人数", len(final_seq))
         with col2:
-            unique_colors = len(set(final_seq))
-            st.metric("出现颜色种数", unique_colors)
+            st.metric("颜色种数", len(set(final_seq)))
         
-        st.subheader("颜色人数统计")
+        st.subheader("颜色人数核对")
         count_dict = {c: final_seq.count(c) for c in COLORS_LIST if final_seq.count(c) > 0}
         df = pd.DataFrame({
-            "颜色代码": list(count_dict.keys()),
-            "颜色名称": [COLOR_NAMES[c] for c in count_dict.keys()],
-            "实际生成人数": list(count_dict.values()),
-            "输入目标人数": [total_counts[c] for c in count_dict.keys()]
+            "颜色": [COLOR_NAMES[c] for c in count_dict],
+            "代码": list(count_dict.keys()),
+            "实际": list(count_dict.values()),
+            "目标": [total_counts[c] for c in count_dict]
         })
         st.dataframe(df, use_container_width=True)
         
-        st.subheader("进度解锁检查")
-        check_pass = True
+        # 解锁进度检查
+        all_ok = True
         for code in COLORS_LIST:
             if total_counts[code] > 0:
-                first_idx = final_seq.index(code) if code in final_seq else -1
-                if first_idx >= 0:
-                    progress_at_first = first_idx / len(final_seq) * 100
-                    expected_unlock = unlock_progress[code]
-                    if progress_at_first < expected_unlock - 0.1:
-                        st.warning(f"⚠️ {COLOR_NAMES[code]}({code}) 首次出现在进度 {progress_at_first:.1f}%，但解锁要求是 {expected_unlock}%")
-                        check_pass = False
-        if check_pass:
-            st.success("✅ 所有颜色均满足解锁进度约束。")
+                first = final_seq.index(code) if code in final_seq else -1
+                if first >= 0:
+                    progress = first / len(final_seq) * 100
+                    if progress < unlock_progress[code] - 0.1:
+                        st.warning(f"{COLOR_NAMES[code]} 首次出现于 {progress:.1f}%，解锁要求 {unlock_progress[code]}%")
+                        all_ok = False
+        if all_ok:
+            st.success("✅ 所有颜色解锁进度符合设置。")
         
         max_run = 0
-        current_run = 1
+        cur = 1
         for i in range(1, len(final_seq)):
             if final_seq[i] == final_seq[i-1]:
-                current_run += 1
+                cur += 1
             else:
-                max_run = max(max_run, current_run)
-                current_run = 1
-        max_run = max(max_run, current_run)
+                max_run = max(max_run, cur)
+                cur = 1
+        max_run = max(max_run, cur)
         if max_run <= 10:
-            st.success(f"✅ 最大连续同色人数为 {max_run}，未超过10。")
+            st.success(f"✅ 最大连续同色：{max_run}（≤10）")
         else:
-            st.error(f"❌ 最大连续同色人数为 {max_run}，超过限制10！")
+            st.error(f"❌ 最大连续同色：{max_run}（超过10）")
         
-        st.download_button(
-            label="📥 下载序列文本",
-            data=compressed,
-            file_name="generated_sequence.txt",
-            mime="text/plain"
-        )
+        st.download_button("📥 下载序列", compressed, "sequence.txt")
 
 st.markdown("---")
-st.caption("参数调整说明：解锁进度指该颜色最早可出现的进度百分比；区间人数占比控制各阶段总人数分配；长度概率影响段的切分。")
+st.caption("使用说明：粘贴总序列 → 点击“解析” → 调整参数 → 生成最终序列")
